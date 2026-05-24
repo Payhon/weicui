@@ -59,7 +59,9 @@ app.get('/api/groups', (req, res) => {
   res.json(getGroups({
     scope: typeof req.query.scope === 'string' ? req.query.scope : undefined,
     collection: typeof req.query.collection === 'string' ? req.query.collection : undefined,
-    query: typeof req.query.q === 'string' ? req.query.q : undefined
+    query: typeof req.query.q === 'string' ? req.query.q : undefined,
+    since: typeof req.query.since === 'string' ? req.query.since : undefined,
+    until: typeof req.query.until === 'string' ? req.query.until : undefined
   }));
 });
 

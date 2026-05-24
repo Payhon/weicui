@@ -41,6 +41,7 @@ type Metric = {
   value: string;
   hint: string;
   tone?: Tone;
+  actionLabel?: string;
 };
 
 type Preflight = {
@@ -121,7 +122,7 @@ type Scope = {
   label: string;
 };
 
-type GroupListScope = 'all' | 'favorite' | 'ungrouped' | 'collection';
+type GroupListScope = 'all' | 'favorite' | 'ungrouped' | 'collection' | 'active' | 'silent';
 type GroupTab = 'members' | 'messages' | 'files' | 'links' | 'videos' | 'images';
 
 type ContactProfile = {
@@ -158,6 +159,7 @@ type GroupListResponse = {
   scope: GroupListScope;
   collection: string;
   query: string;
+  range?: { since: string; until: string };
   total: number;
   groups: GroupItem[];
 };
@@ -464,11 +466,13 @@ function App() {
     setLinks((await response.json()) as LinksResponse);
   }
 
-  async function loadGroups(nextScope = groupScope, nextQuery = groupQuery) {
+  async function loadGroups(nextScope = groupScope, nextQuery = groupQuery, nextRange = range) {
     const params = new URLSearchParams({
       scope: nextScope.scope,
       collection: nextScope.collection,
-      q: nextQuery
+      q: nextQuery,
+      since: nextRange.since,
+      until: nextRange.until
     });
     const response = await fetch(`/api/groups?${params.toString()}`);
     setGroupList((await response.json()) as GroupListResponse);
@@ -534,6 +538,7 @@ function App() {
       void loadFeed(range);
       void loadRadar(range);
       void loadLinks(range);
+      void loadGroups(groupScope, groupQuery, range);
     }
     if (module === 'moments') void loadMoments(range);
     if (module === 'media') void loadMedia(range);
@@ -570,7 +575,7 @@ function App() {
         loadFeed(nextRange, feedKind, feedQuery, scope),
         loadRadar(nextRange, scope),
         loadLinks(nextRange, scope),
-        loadGroups(groupScope, groupQuery),
+        loadGroups(groupScope, groupQuery, nextRange),
         loadGroupCollections()
       ]);
       return;
@@ -636,11 +641,41 @@ function App() {
     setView(nextView);
   }
 
+  function openFeedKind(kind: FeedKind) {
+    const allScope: Scope = { type: 'all', value: '', label: '所有群' };
+    setModule('group');
+    setScope(allScope);
+    setFeedKind(kind);
+    setFeedQuery('');
+    setView('feed');
+    void loadFeed(range, kind, '', allScope);
+  }
+
   function openGroupList(nextScope: GroupListScope, label: string, collection = '') {
     const value = { scope: nextScope, label, collection };
+    setModule('group');
     setGroupScope(value);
+    setGroupQuery('');
     setView('groups');
-    void loadGroups(value, groupQuery);
+    void loadGroups(value, '', range);
+  }
+
+  function openDashboardMetric(metric: Metric) {
+    if (metric.label === '活跃群') {
+      openGroupList('active', '活跃群');
+      return;
+    }
+    if (metric.label === '总消息') {
+      openFeedKind('all');
+      return;
+    }
+    if (metric.label === '@ 我的') {
+      openFeedKind('mentions');
+      return;
+    }
+    if (metric.label === '静默群') {
+      openGroupList('silent', '静默群');
+    }
   }
 
   function toggleCollection(collectionName: string) {
@@ -882,7 +917,7 @@ function App() {
                 onPreviewVideo={setPreviewVideo}
               />
             ) : view === 'dashboard' ? (
-              <DashboardView data={data} copied={copied} copyBrief={copyBrief} onSelect={setSelected} />
+              <DashboardView data={data} copied={copied} copyBrief={copyBrief} onMetricClick={openDashboardMetric} onSelect={setSelected} />
             ) : view === 'feed' ? (
               <FeedView
                 feed={feed}
@@ -961,11 +996,13 @@ function DashboardView({
   data,
   copied,
   copyBrief,
+  onMetricClick,
   onSelect
 }: {
   data: Dashboard;
   copied: boolean;
   copyBrief: () => void;
+  onMetricClick: (metric: Metric) => void;
   onSelect: (item: SignalItem) => void;
 }) {
   return (
@@ -973,7 +1010,7 @@ function DashboardView({
       <StatusBanner preflight={data.preflight} sync={data.sync} />
       <section className="metrics-grid">
         {data.metrics.map((metric, index) => (
-          <MetricCard key={metric.label} metric={metric} index={index} />
+          <MetricCard key={metric.label} metric={{ ...metric, actionLabel: metricActionLabel(metric.label) }} index={index} onClick={() => onMetricClick(metric)} />
         ))}
       </section>
 
@@ -2086,7 +2123,7 @@ function Segmented<T extends string>({
   );
 }
 
-function MetricCard({ metric, index }: { metric: Metric; index: number }) {
+function MetricCard({ metric, index, onClick }: { metric: Metric; index: number; onClick?: () => void }) {
   const icons = [<Signal size={18} />, <MessageCircle size={18} />, <Bell size={18} />, <Activity size={18} />];
   return (
     <article className={`metric-card tone-${metric.tone ?? 'neutral'}`}>
@@ -2094,10 +2131,25 @@ function MetricCard({ metric, index }: { metric: Metric; index: number }) {
         <span>{icons[index] ?? <Hash size={18} />}{metric.label}</span>
         <em>METRIC</em>
       </div>
-      <strong>{metric.value}</strong>
+      <strong>
+        {onClick ? (
+          <button className="metric-value-button" type="button" onClick={onClick} aria-label={metric.actionLabel || `查看${metric.label}`}>
+            {metric.value}
+          </button>
+        ) : metric.value}
+      </strong>
       <p>{metric.hint}</p>
+      {onClick ? <span className="metric-action-hint">{metric.actionLabel || '点击查看'}</span> : null}
     </article>
   );
+}
+
+function metricActionLabel(label: string) {
+  if (label === '活跃群') return '查看活跃群';
+  if (label === '总消息') return '查看消息流';
+  if (label === '@ 我的') return '查看 @ 我的';
+  if (label === '静默群') return '查看静默群';
+  return '点击查看';
 }
 
 function StatusBanner({ preflight, sync }: { preflight: Preflight; sync: SyncStatus }) {

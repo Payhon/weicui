@@ -1,7 +1,7 @@
 import { getContactProfile } from './contacts.js';
 import { db } from './db.js';
 
-export type GroupScope = 'all' | 'favorite' | 'ungrouped' | 'collection';
+export type GroupScope = 'all' | 'favorite' | 'ungrouped' | 'collection' | 'active' | 'silent';
 export type GroupTab = 'members' | 'messages' | 'files' | 'links' | 'videos' | 'images';
 
 type GroupRow = {
@@ -87,10 +87,11 @@ export function getGroupCollections() {
   }));
 }
 
-export function getGroups(params: { scope?: string; collection?: string; query?: string }) {
+export function getGroups(params: { scope?: string; collection?: string; query?: string; since?: string; until?: string }) {
   const scope = normalizeScope(params.scope);
   const query = (params.query || '').trim();
-  const where = buildGroupWhere(scope, params.collection || '', query);
+  const range = normalizeRange(params.since, params.until);
+  const where = buildGroupWhere(scope, params.collection || '', query, range);
 
   const rows = db.prepare(`
     SELECT
@@ -126,6 +127,7 @@ export function getGroups(params: { scope?: string; collection?: string; query?:
     scope,
     collection: params.collection || '',
     query,
+    range,
     total: rows.length,
     groups: rows.map((row) => toGroupListItem(row, 'group'))
   };
@@ -379,11 +381,19 @@ function getLinks(groupId: string) {
   );
 }
 
-function buildGroupWhere(scope: GroupScope, collection: string, query: string) {
+function buildGroupWhere(scope: GroupScope, collection: string, query: string, range: { since: string; until: string }) {
   const parts: string[] = ["g.chat_type = 'group'"];
   const args: unknown[] = [];
   if (scope === 'favorite') parts.push('g.favorite = 1');
   if (scope === 'ungrouped') parts.push("g.collection = '未分组'");
+  if (scope === 'active') {
+    parts.push('EXISTS (SELECT 1 FROM messages active_m WHERE active_m.group_id = g.id AND date(active_m.sent_at) BETWEEN ? AND ?)');
+    args.push(range.since, range.until);
+  }
+  if (scope === 'silent') {
+    parts.push('NOT EXISTS (SELECT 1 FROM messages active_m WHERE active_m.group_id = g.id AND date(active_m.sent_at) BETWEEN ? AND ?)');
+    args.push(range.since, range.until);
+  }
   if (scope === 'collection' && collection) {
     parts.push('g.collection = ?');
     args.push(collection);
@@ -506,8 +516,14 @@ export function toMessage(row: Record<string, unknown>) {
 }
 
 function normalizeScope(scope?: string): GroupScope {
-  if (scope === 'favorite' || scope === 'ungrouped' || scope === 'collection') return scope;
+  if (scope === 'favorite' || scope === 'ungrouped' || scope === 'collection' || scope === 'active' || scope === 'silent') return scope;
   return 'all';
+}
+
+function normalizeRange(since?: string, until?: string) {
+  const end = until || new Date().toISOString().slice(0, 10);
+  const start = since || new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return { since: start, until: end };
 }
 
 function normalizeTab(tab: string): GroupTab {
