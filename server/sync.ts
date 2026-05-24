@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { refreshContactProfilesFromWx, upsertContactProfileFromRaw } from './contacts.js';
+import { refreshContactProfilesFromWx, refreshContactProfilesFromWxCache, upsertContactProfileFromRaw } from './contacts.js';
 import { db, resetChatTypeData, resetMomentsData } from './db.js';
 import { getWxCacheGroupName, isPlaceholderGroupName, refreshGroupNamesFromWxCache } from './groupNames.js';
 import { applyAutoCollections } from './groups.js';
@@ -101,6 +101,7 @@ export async function performIncrementalSync(scope: SyncScope = 'group') {
 async function performFullSync(runId: number, since: string, until: string, scope: SyncScope) {
   try {
     await refreshContactProfilesFromWx();
+    refreshContactProfilesFromWxCache();
 
     if (scope === 'group' || scope === 'private' || scope === 'all') {
       const sessions = (await wxJson(['sessions', '-n', '1000'], 90_000)) as AnyRecord[];

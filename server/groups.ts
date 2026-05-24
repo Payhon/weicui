@@ -18,6 +18,14 @@ type GroupRow = {
   file_count: number;
   signal_count: number;
   sample: string | null;
+  last_message_id?: string | null;
+  last_message_sender?: string | null;
+  last_message_sent_at?: string | null;
+  last_message_type?: string | null;
+  last_message_content?: string | null;
+  last_message_mentions_me?: number | null;
+  last_message_has_link?: number | null;
+  last_message_raw_json?: string | null;
 };
 
 export function applyAutoCollections() {
@@ -104,7 +112,8 @@ export function getGroups(params: { scope?: string; collection?: string; query?:
         WHERE mm.group_id = g.id AND mm.content <> ''
         ORDER BY datetime(mm.sent_at) DESC
         LIMIT 1
-      ), 1, 120) AS sample
+      ), 1, 120) AS sample,
+      ${latestMessageSelect('g.id')}
     FROM groups g
     LEFT JOIN messages m ON m.group_id = g.id
     LEFT JOIN signals s ON s.message_id = m.id
@@ -163,7 +172,8 @@ export function getPrivateChats(params: { query?: string }) {
         WHERE mm.group_id = g.id AND mm.content <> ''
         ORDER BY datetime(mm.sent_at) DESC
         LIMIT 1
-      ), 1, 120) AS sample
+      ), 1, 120) AS sample,
+      ${latestMessageSelect('g.id')}
     FROM groups g
     LEFT JOIN messages m ON m.group_id = g.id
     LEFT JOIN signals s ON s.message_id = m.id
@@ -255,7 +265,8 @@ function getSessionSummary(groupId: string, chatType: 'group' | 'private') {
         WHERE mm.group_id = g.id AND mm.content <> ''
         ORDER BY datetime(mm.sent_at) DESC
         LIMIT 1
-      ), 1, 120) AS sample
+      ), 1, 120) AS sample,
+      ${latestMessageSelect('g.id')}
     FROM groups g
     LEFT JOIN messages m ON m.group_id = g.id
     LEFT JOIN signals s ON s.message_id = m.id
@@ -405,8 +416,42 @@ function toGroupListItem(row: GroupRow, chatType: 'group' | 'private' = 'group')
     fileCount: Number(row.file_count || 0),
     signalCount: Number(row.signal_count || 0),
     lastMessageAt: formatDateTime(row.last_message_at || ''),
-    sample: row.sample || ''
+    sample: row.sample || '',
+    lastMessage: toLatestMessage(row)
   };
+}
+
+function latestMessageSelect(groupIdExpression: string) {
+  const base = `
+    FROM messages mm
+    WHERE mm.group_id = ${groupIdExpression}
+    ORDER BY datetime(mm.sent_at) DESC
+    LIMIT 1
+  `;
+  return `
+      (SELECT id ${base}) AS last_message_id,
+      (SELECT sender ${base}) AS last_message_sender,
+      (SELECT sent_at ${base}) AS last_message_sent_at,
+      (SELECT type ${base}) AS last_message_type,
+      (SELECT content ${base}) AS last_message_content,
+      (SELECT mentions_me ${base}) AS last_message_mentions_me,
+      (SELECT has_link ${base}) AS last_message_has_link,
+      (SELECT raw_json ${base}) AS last_message_raw_json
+  `;
+}
+
+function toLatestMessage(row: GroupRow) {
+  if (!row.last_message_id) return null;
+  return toMessage({
+    id: row.last_message_id,
+    sender: row.last_message_sender || '',
+    sentAt: row.last_message_sent_at || '',
+    type: row.last_message_type || '',
+    content: row.last_message_content || '',
+    mentionsMe: row.last_message_mentions_me || 0,
+    hasLink: row.last_message_has_link || 0,
+    rawJson: row.last_message_raw_json || ''
+  });
 }
 
 function toMember(row: Record<string, unknown>) {

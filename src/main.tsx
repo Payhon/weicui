@@ -151,6 +151,7 @@ type GroupItem = {
   signalCount: number;
   lastMessageAt: string;
   sample: string;
+  lastMessage?: GroupMessage | null;
 };
 
 type GroupListResponse = {
@@ -1082,6 +1083,9 @@ function PrivateChatListView({
   onSearch: () => void;
   onOpen: (chatId: string) => void;
 }) {
+  const [previewImage, setPreviewImage] = useState<GroupMessage | null>(null);
+  const [previewVideo, setPreviewVideo] = useState<GroupMessage | null>(null);
+
   return (
     <>
       <section className="feed-toolbar">
@@ -1111,14 +1115,21 @@ function PrivateChatListView({
         {privateChats && privateChats.chats.length === 0 ? <div className="empty-state">暂无私聊数据，点击全量同步读取近期私聊。</div> : null}
         <div className="group-list">
           {(privateChats?.chats ?? []).map((chat) => (
-            <article className="group-row private-chat-row" key={chat.id}>
+            <article className={`group-row private-chat-row ${chat.lastMessage?.image || chat.lastMessage?.video ? 'has-preview' : ''}`} key={chat.id}>
               <button className="group-row-main private-chat-main" onClick={() => onOpen(chat.id)}>
                 <PersonAvatar profile={chat.profile} fallback={chat.name} />
                 <span>
                   <strong>{chat.name}</strong>
-                  <small>{chat.lastMessageAt || '暂无时间'} · {chat.sample || chat.profile?.subtitle || '近期私聊'}</small>
+                  <small>{chat.lastMessageAt || '暂无时间'} · {chat.lastMessage?.title || chat.sample || chat.profile?.subtitle || '近期私聊'}</small>
                 </span>
               </button>
+              {chat.lastMessage?.image || chat.lastMessage?.video ? (
+                <PrivateLastMessagePreview
+                  message={chat.lastMessage}
+                  onPreviewImage={setPreviewImage}
+                  onPreviewVideo={setPreviewVideo}
+                />
+              ) : null}
               <span className="group-row-stats">
                 <span>{formatCompact(chat.messageCount)} 消息</span>
                 <span>{formatCompact(chat.linkCount)} 链接</span>
@@ -1128,8 +1139,45 @@ function PrivateChatListView({
           ))}
         </div>
       </section>
+      {previewImage ? <ImageLightbox message={previewImage} onClose={() => setPreviewImage(null)} /> : null}
+      {previewVideo ? <VideoLightbox message={previewVideo} onClose={() => setPreviewVideo(null)} /> : null}
     </>
   );
+}
+
+function PrivateLastMessagePreview({
+  message,
+  onPreviewImage,
+  onPreviewVideo
+}: {
+  message: GroupMessage;
+  onPreviewImage: (message: GroupMessage) => void;
+  onPreviewVideo: (message: GroupMessage) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (message.image) {
+    return (
+      <button className="private-message-thumb" type="button" onClick={() => onPreviewImage(message)} aria-label="预览最近图片">
+        {failed ? (
+          <span className="private-message-thumb-fallback">
+            <ImageIcon size={18} />
+            图片
+          </span>
+        ) : (
+          <img src={message.image.previewUrl} alt={`${message.sender} 发送的图片`} loading="lazy" onError={() => setFailed(true)} />
+        )}
+      </button>
+    );
+  }
+  if (message.video) {
+    return (
+      <button className="private-message-thumb video" type="button" onClick={() => onPreviewVideo(message)} aria-label="播放最近视频">
+        <Video size={22} />
+        <span>视频</span>
+      </button>
+    );
+  }
+  return null;
 }
 
 function GroupDetailView({

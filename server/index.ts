@@ -1,6 +1,6 @@
 import cors from 'cors';
 import express from 'express';
-import { backfillContactProfilesFromExistingData } from './contacts.js';
+import { backfillContactProfilesFromExistingData, refreshContactProfilesFromWxCache } from './contacts.js';
 import { ensureSchema } from './db.js';
 import { getDashboard } from './dashboard.js';
 import { getFeed } from './feed.js';
@@ -14,6 +14,7 @@ import { getSyncStatus, performIncrementalSync, startAutoIncrementalSync, startF
 import { checkPreflight } from './wx.js';
 
 ensureSchema();
+refreshContactProfilesFromWxCache();
 backfillContactProfilesFromExistingData();
 refreshGroupNamesFromWxCache();
 applyAutoCollections();

@@ -1,5 +1,9 @@
 import { db } from './db.js';
 import { wxJson } from './wx.js';
+import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -137,6 +141,56 @@ export async function refreshContactProfilesFromWx() {
   } catch {
     return 0;
   }
+}
+
+export function refreshContactProfilesFromWxCache() {
+  const cacheDir = path.join(os.homedir(), '.wx-cli', 'cache');
+  if (!fs.existsSync(cacheDir)) return 0;
+  const files = fs.readdirSync(cacheDir)
+    .filter((file) => file.endsWith('.db'))
+    .map((file) => path.join(cacheDir, file));
+  let total = 0;
+
+  for (const file of files) {
+    let cacheDb: Database.Database | undefined;
+    try {
+      cacheDb = new Database(file, { readonly: true, fileMustExist: true });
+      const tables = cacheDb.prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name IN ('contact', 'stranger')
+      `).all() as Array<{ name: string }>;
+      for (const table of tables) {
+        const rows = cacheDb.prepare(`
+          SELECT username, remark, nick_name, alias, big_head_url, small_head_url
+          FROM ${table.name}
+          WHERE username IS NOT NULL AND username <> ''
+          LIMIT 20000
+        `).all() as AnyRecord[];
+        const tx = db.transaction((items: AnyRecord[]) => {
+          for (const row of items) {
+            upsertContactProfile({
+              username: firstString(row, ['username']),
+              remarkName: firstString(row, ['remark']),
+              nickname: firstString(row, ['nick_name', 'alias']),
+              displayName: firstString(row, ['remark', 'nick_name', 'alias', 'username']),
+              avatarUrl: firstString(row, ['small_head_url', 'big_head_url']),
+              source: `wx-cache-${table.name}`,
+              rawJson: JSON.stringify(row)
+            });
+          }
+        });
+        tx(rows);
+        total += rows.length;
+      }
+    } catch {
+      // Some wx-cli cache shards are message-only databases; ignore them.
+    } finally {
+      cacheDb?.close();
+    }
+  }
+
+  return total;
 }
 
 export function backfillContactProfilesFromExistingData() {
