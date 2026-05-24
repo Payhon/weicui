@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Weicui SNS Media Worker</title>
+</head>
+<body>
+  <script>
+    window.VTS_WASM_URL = './wasm_video_decode.wasm';
+    window.MAX_HEAP_SIZE = 33554432;
+    window.__weicuiLastKeyStream = null;
+    window.wasm_isaac_generate = function(ptr, size) {
+      const wasmArray = new Uint8Array(Module.HEAPU8.buffer, ptr, size);
+      window.__weicuiLastKeyStream = new Uint8Array(Array.from(wasmArray).reverse());
+    };
+  </script>
+  <script src="./wasm_video_decode.js"></script>
+  <script>
+    window.__generateWeicuiSnsKeyStream = async function(decodeKey, chunkCount, chunkSize) {
+      const waitForModule = () => new Promise((resolve, reject) => {
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+          if (typeof Module !== 'undefined' && Module.WxIsaac64) {
+            clearInterval(timer);
+            resolve();
+          } else if (Date.now() - startedAt > 30000) {
+            clearInterval(timer);
+            reject(new Error('WASM module timeout'));
+          }
+        }, 50);
+      });
+      await waitForModule();
+      const decryptor = new Module.WxIsaac64(String(decodeKey));
+      let binary = '';
+      try {
+        for (let chunk = 0; chunk < chunkCount; chunk += 1) {
+          window.__weicuiLastKeyStream = null;
+          decryptor.generate(chunkSize);
+          if (!window.__weicuiLastKeyStream) throw new Error('empty keystream');
+          for (let index = 0; index < window.__weicuiLastKeyStream.length; index += 8192) {
+            const part = window.__weicuiLastKeyStream.subarray(index, index + 8192);
+            binary += String.fromCharCode.apply(null, part);
+          }
+        }
+      } finally {
+        decryptor.delete();
+      }
+      return btoa(binary);
+    };
+  </script>
+</body>
+</html>

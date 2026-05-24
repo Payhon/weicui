@@ -244,6 +244,22 @@ type PrivateChatsResponse = {
   chats: GroupItem[];
 };
 
+type MomentMedia = {
+  thumb?: string;
+  url?: string;
+  type?: string | number;
+  width?: number;
+  height?: number;
+  video_duration?: number;
+  total_size?: number;
+  thumb_enc_idx?: string;
+  thumb_key?: string;
+  thumb_token?: string;
+  url_enc_idx?: string;
+  url_key?: string;
+  url_token?: string;
+};
+
 type MomentItem = {
   id: string;
   author: string;
@@ -254,7 +270,7 @@ type MomentItem = {
   content: string;
   time: string;
   absoluteTime: string;
-  media: unknown[];
+  media: MomentMedia[];
   mediaCount: number;
   location: string;
 };
@@ -1537,15 +1553,18 @@ function MomentsView({
           {(moments?.items ?? []).length === 0 ? <div className="empty-state">暂无朋友圈缓存数据，点击全量同步读取本机缓存。</div> : null}
           <div className="moment-list">
             {(moments?.items ?? []).map((item) => (
-              <button className="moment-row" key={item.id} onClick={() => onSelect(item)}>
-                <PersonAvatar profile={item.authorProfile} fallback={item.authorName || item.author} />
-                <span className="moment-main">
-                  <strong>{item.authorName || item.author}</strong>
-                  <small>{item.authorProfile?.subtitle || '朋友圈作者'} · {item.time}{item.location ? ` · ${item.location}` : ''}</small>
-                  <em>{item.content || '无正文内容'}</em>
-                </span>
-                <span className="group-chip">{item.mediaCount} 媒体</span>
-              </button>
+              <article className={`moment-row ${item.media.length ? 'with-media' : ''}`} key={item.id}>
+                <button className="moment-summary" type="button" onClick={() => onSelect(item)}>
+                  <PersonAvatar profile={item.authorProfile} fallback={item.authorName || item.author} />
+                  <span className="moment-main">
+                    <strong>{item.authorName || item.author}</strong>
+                    <small>{item.authorProfile?.subtitle || '朋友圈作者'} · {item.time}{item.location ? ` · ${item.location}` : ''}</small>
+                    <em>{item.content || '无正文内容'}</em>
+                  </span>
+                  <span className="group-chip">{item.mediaCount} 媒体</span>
+                </button>
+                <MomentMediaGrid media={item.media} momentId={item.id} />
+              </article>
             ))}
           </div>
         </article>
@@ -1574,6 +1593,58 @@ function MomentsView({
       </section>
     </>
   );
+}
+
+function MomentMediaGrid({ media, momentId }: { media: MomentMedia[]; momentId: string }) {
+  const visible = media.filter((item) => item.thumb || item.url).slice(0, 9);
+  if (visible.length === 0) return null;
+  return (
+    <div className={`moment-media-grid count-${Math.min(visible.length, 4)}`}>
+      {visible.map((item, index) => (
+        <MomentMediaTile item={item} momentId={momentId} index={index} key={`${item.thumb || item.url}-${index}`} />
+      ))}
+    </div>
+  );
+}
+
+function MomentMediaTile({ item, momentId, index }: { item: MomentMedia; momentId: string; index: number }) {
+  const [failed, setFailed] = useState(false);
+  const isVideo = isMomentVideo(item);
+  const thumb = `/api/moments/${encodeURIComponent(momentId)}/media/${index}?variant=thumb`;
+  const href = `/api/moments/${encodeURIComponent(momentId)}/media/${index}?variant=full`;
+  const meta = formatMomentMediaMeta(item);
+  return (
+    <a className={`moment-media-tile ${isVideo ? 'video' : ''}`} href={href} target="_blank" rel="noreferrer" aria-label={`打开朋友圈媒体 ${index + 1}`}>
+      {!failed ? (
+        <img src={thumb} alt={`朋友圈媒体 ${index + 1}`} loading="lazy" onError={() => setFailed(true)} />
+      ) : (
+        <span className="moment-media-fallback">
+          {isVideo ? <Video size={22} /> : <ImageIcon size={22} />}
+        </span>
+      )}
+      <span className="moment-media-caption">
+        <strong>{isVideo ? '视频' : '图片'}</strong>
+        <small>{meta}</small>
+      </span>
+      {isVideo ? (
+        <span className="moment-video-mark">
+          <Video size={16} />
+        </span>
+      ) : null}
+    </a>
+  );
+}
+
+function isMomentVideo(item: MomentMedia) {
+  const type = String(item.type || '').toLowerCase();
+  return type === 'video' || type === '4' || type === '6' || type === '15' || Number(item.video_duration || 0) > 0;
+}
+
+function formatMomentMediaMeta(item: MomentMedia) {
+  if (isMomentVideo(item) && Number(item.video_duration || 0) > 0) return formatDuration(Number(item.video_duration));
+  if (item.width && item.height) return `${item.width} x ${item.height}`;
+  if (item.total_size) return formatBytes(Number(item.total_size));
+  return '朋友圈媒体';
 }
 
 function MediaView({
@@ -2298,6 +2369,20 @@ function readSyncCadence(): SyncCadence {
 
 function formatCompact(value: number) {
   return new Intl.NumberFormat('zh-CN', { notation: value > 9999 ? 'compact' : 'standard' }).format(value);
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '媒体';
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '视频';
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds % 60);
+  return `${minutes}:${String(rest).padStart(2, '0')}`;
 }
 
 function collectionColor(index: number) {

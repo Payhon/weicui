@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express from 'express';
+import path from 'node:path';
 import { backfillContactProfilesFromExistingData, refreshContactProfilesFromWxCache } from './contacts.js';
 import { ensureSchema } from './db.js';
 import { getDashboard } from './dashboard.js';
@@ -9,6 +10,7 @@ import { applyAutoCollections, getGroupCollections, getGroupDetail, getGroups, g
 import { getLinks, getRadar } from './insights.js';
 import { getMediaLibrary } from './mediaLibrary.js';
 import { resolveMessageFile, resolveMessageImage, resolveMessageVideo } from './media.js';
+import { configureMomentMediaResolver, resolveMomentMedia } from './momentMedia.js';
 import { getMoments, getMomentNotifications, searchMoments } from './moments.js';
 import { getSyncStatus, performIncrementalSync, startAutoIncrementalSync, startFullSync, type SyncScope } from './sync.js';
 import { checkPreflight } from './wx.js';
@@ -23,6 +25,7 @@ startAutoIncrementalSync();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use('/_wechat-wasm', express.static(path.resolve(process.cwd(), 'server', 'wechat_files')));
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, name: 'weicui' });
@@ -178,6 +181,21 @@ app.get('/api/moments/notifications', (req, res) => {
   }));
 });
 
+app.get('/api/moments/:id/media/:index', async (req, res) => {
+  const variant = req.query.variant === 'full' ? 'full' : 'thumb';
+  const media = await resolveMomentMedia(req.params.id, Number(req.params.index), variant);
+  if (!media) {
+    res.status(404).json({ error: 'moment_media_not_found' });
+    return;
+  }
+  res.setHeader('Content-Type', media.mime);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  if (variant === 'full') {
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(media.fileName)}"`);
+  }
+  res.sendFile(media.path);
+});
+
 app.get('/api/media', (req, res) => {
   res.json(getMediaLibrary({
     since: typeof req.query.since === 'string' ? req.query.since : undefined,
@@ -208,6 +226,7 @@ app.post('/api/sync/incremental', async (req, res) => {
 });
 
 const port = Number(process.env.PORT || 5174);
+configureMomentMediaResolver(`http://127.0.0.1:${port}/_wechat-wasm/`);
 app.listen(port, '127.0.0.1', () => {
   console.log(`wxlocal API listening at http://127.0.0.1:${port}`);
 });
