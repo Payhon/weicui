@@ -9,7 +9,8 @@ import { refreshGroupNamesFromWxCache } from './groupNames.js';
 import { applyAutoCollections, getGroupCollections, getGroupDetail, getGroups, getPrivateChatDetail, getPrivateChats, toggleFavorite } from './groups.js';
 import { getLinks, getRadar } from './insights.js';
 import { getMediaLibrary } from './mediaLibrary.js';
-import { resolveMessageFile, resolveMessageImage, resolveMessageVideo } from './media.js';
+import { resolveMessageFile, resolveMessageImage, resolveMessageVideo, resolveMessageVideoThumbnail } from './media.js';
+import { resolveMessageEmoji } from './emoji.js';
 import { configureMomentMediaResolver, resolveMomentMedia } from './momentMedia.js';
 import { getMoments, getMomentNotifications, searchMoments } from './moments.js';
 import { getSyncStatus, performIncrementalSync, startAutoIncrementalSync, startFullSync, type SyncScope } from './sync.js';
@@ -89,12 +90,36 @@ app.get('/api/messages/:id/image', async (req, res) => {
 app.get('/api/messages/:id/video', async (req, res) => {
   const video = await resolveMessageVideo(req.params.id);
   if (!video) {
-    res.status(404).json({ error: 'video_not_found' });
+    const thumb = await resolveMessageVideoThumbnail(req.params.id);
+    res.status(404).json({ error: 'video_not_cached', thumbnailAvailable: Boolean(thumb) });
     return;
   }
   res.setHeader('Content-Type', video.mime);
   res.setHeader('Cache-Control', 'private, max-age=86400');
   res.sendFile(video.path);
+});
+
+app.get('/api/messages/:id/video/thumb', async (req, res) => {
+  const thumb = await resolveMessageVideoThumbnail(req.params.id);
+  if (!thumb) {
+    res.status(404).json({ error: 'video_thumbnail_not_found' });
+    return;
+  }
+  res.setHeader('Content-Type', thumb.mime);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.sendFile(thumb.path);
+});
+
+app.get('/api/messages/:id/emoji', async (req, res) => {
+  const emoji = await resolveMessageEmoji(req.params.id);
+  if (!emoji) {
+    res.status(404).json({ error: 'emoji_not_found' });
+    return;
+  }
+  res.setHeader('Content-Type', emoji.mime);
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(emoji.fileName)}"`);
+  res.sendFile(emoji.path);
 });
 
 app.get('/api/messages/:id/file', async (req, res) => {

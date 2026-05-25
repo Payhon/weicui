@@ -99,8 +99,8 @@ function buildMediaRequest(media: SnsMedia, variant: MomentMediaVariant) {
   const useThumb = variant === 'thumb';
   const rawUrl = useThumb ? media.thumb || media.url || '' : media.url || media.thumb || '';
   const token = useThumb ? media.thumb_token || media.url_token || '' : media.url_token || media.thumb_token || '';
-  const key = useThumb ? media.thumb_key || media.url_key || '' : media.url_key || media.thumb_key || '';
-  const encIdx = useThumb ? media.thumb_enc_idx || media.url_enc_idx || '1' : media.url_enc_idx || media.thumb_enc_idx || '1';
+  const key = normalizeDecodeKey(useThumb ? media.thumb_key || media.url_key || '' : media.url_key || media.thumb_key || '');
+  const encIdx = normalizeEncIdx(useThumb ? media.thumb_enc_idx || media.url_enc_idx : media.url_enc_idx || media.thumb_enc_idx);
   return {
     url: normalizeSnsUrl(rawUrl, token, encIdx, isMomentVideo(media, rawUrl), useThumb),
     key
@@ -109,7 +109,7 @@ function buildMediaRequest(media: SnsMedia, variant: MomentMediaVariant) {
 
 function normalizeSnsUrl(value: string, token: string, encIdx: string, isVideo: boolean, keepThumb: boolean) {
   if (!value) return '';
-  let fixedUrl = value.replace(/^http:\/\//i, 'https://');
+  let fixedUrl = value;
   if (!isVideo && !keepThumb) fixedUrl = fixedUrl.replace(/\/150($|\?)/, '/0$1');
   if (!token) return fixedUrl;
 
@@ -130,15 +130,29 @@ function normalizeSnsUrl(value: string, token: string, encIdx: string, isVideo: 
   return url.toString();
 }
 
+function normalizeDecodeKey(value: string | undefined) {
+  const normalized = String(value || '').trim();
+  return normalized;
+}
+
+function normalizeEncIdx(value: string | undefined) {
+  const normalized = String(value || '').trim();
+  return normalized && normalized !== '0' ? normalized : '1';
+}
+
 async function downloadMedia(url: string) {
-  const response = await fetch(url, {
-    headers: {
-      Accept: '*/*',
-      'User-Agent': 'MicroMessenger Client'
-    }
-  });
-  if (!response.ok) return null;
-  return Buffer.from(await response.arrayBuffer());
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: '*/*',
+        'User-Agent': 'MicroMessenger Client'
+      }
+    });
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  } catch {
+    return null;
+  }
 }
 
 async function decryptMedia(input: Buffer, key: string, isVideo: boolean) {

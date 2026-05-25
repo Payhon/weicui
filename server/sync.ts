@@ -62,8 +62,6 @@ export async function performIncrementalSync(scope: SyncScope = 'group') {
       const until = toDateString(new Date());
       const since = toDateString(addDays(new Date(), -7));
       await syncMoments(since, until, false);
-    } else if (normalizedScope === 'media') {
-      status = { ...status, phase: '刷新影萃索引' };
     } else {
       const rows = (await wxJson(['new-messages', '-n', '500'], 60_000)) as AnyRecord[];
       const chatTypes = chatTypesForScope(normalizedScope);
@@ -84,6 +82,11 @@ export async function performIncrementalSync(scope: SyncScope = 'group') {
       if (chatTypes.includes('group')) refreshGroupNamesFromWxCache();
       applyAutoCollections();
       rebuildSignals();
+      if (normalizedScope === 'media') {
+        const until = toDateString(new Date());
+        const since = toDateString(addDays(new Date(), -7));
+        await syncMoments(since, until, false);
+      }
     }
     status = { running: false, phase: 'idle', finishedAt: new Date().toISOString() };
   } catch (error) {
@@ -103,19 +106,15 @@ async function performFullSync(runId: number, since: string, until: string, scop
     await refreshContactProfilesFromWx();
     refreshContactProfilesFromWxCache();
 
-    if (scope === 'group' || scope === 'private' || scope === 'all') {
+    if (scope === 'group' || scope === 'private' || scope === 'media' || scope === 'all') {
       const sessions = (await wxJson(['sessions', '-n', '1000'], 90_000)) as AnyRecord[];
       for (const chatType of chatTypesForScope(scope)) {
         await syncChatSessions(sessions, chatType, since, until, true);
       }
     }
 
-    if (scope === 'moments' || scope === 'all') {
+    if (scope === 'moments' || scope === 'media' || scope === 'all') {
       await syncMoments(since, until, true);
-    }
-
-    if (scope === 'media') {
-      status = { ...status, phase: '刷新影萃索引' };
     }
 
     db.prepare('UPDATE sync_runs SET status = ?, finished_at = ? WHERE id = ?')
@@ -234,7 +233,8 @@ function insertMessages(session: ReturnType<typeof normalizeSession>, rows: AnyR
       const sentAt = normalizeTime(row.sent_at ?? row.create_time ?? row.timestamp ?? row.time) || new Date().toISOString();
       const sender = firstString(row, ['sender', 'sender_name', 'from', 'from_name', 'talker', 'nickname', 'last_sender']) || (session.chatType === 'private' ? session.name : '未知成员');
       const type = firstString(row, ['type', 'msg_type', 'message_type', 'last_msg_type']) || 'text';
-      const id = firstString(row, ['id', 'msg_id', 'message_id', 'local_id']) || stableId(`${session.id}|${sender}|${sentAt}|${content}`);
+      const rawId = firstString(row, ['id', 'msg_id', 'message_id', 'local_id']);
+      const id = rawId ? scopedMessageId(session.id, rawId) : stableId(`${session.id}|${sender}|${sentAt}|${content}`);
       const mentionsMe = /@我|@所有人|@all/i.test(content) || Boolean(row.mentions_me ?? row.is_at_me);
       const hasLink = /(https?:\/\/|www\.|github\.com|\.com|\.ai|\.dev|\.cn)/i.test(content) || typeof row.url === 'string';
       insert.run({
@@ -420,8 +420,8 @@ function isPersonalChatId(username: string) {
 
 function chatTypesForScope(scope: SyncScope): ChatType[] {
   if (scope === 'private') return ['private'];
-  if (scope === 'all') return ['group', 'private'];
-  return scope === 'group' || scope === 'media' ? ['group'] : [];
+  if (scope === 'all' || scope === 'media') return ['group', 'private'];
+  return scope === 'group' ? ['group'] : [];
 }
 
 function normalizeScope(scope: string): SyncScope {
@@ -464,6 +464,10 @@ function normalizeTime(value: unknown) {
 
 function stableId(input: string) {
   return crypto.createHash('sha1').update(input).digest('hex');
+}
+
+function scopedMessageId(sessionId: string, rawId: string) {
+  return stableId(`${sessionId}|${rawId}`);
 }
 
 function toDateString(date: Date) {

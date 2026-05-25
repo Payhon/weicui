@@ -1,15 +1,17 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity,
   AtSign,
   Bell,
   CalendarDays,
+  ChevronLeft,
   ChevronRight,
   CheckCircle2,
   Clock,
   Clipboard,
   Database,
+  Download,
   Filter,
   FileText,
   Folder,
@@ -18,8 +20,12 @@ import {
   Image as ImageIcon,
   Link2,
   Loader2,
+  Maximize2,
   MessageCircle,
+  Play,
   RefreshCw,
+  RotateCcw,
+  RotateCw,
   Search,
   Settings,
   Signal,
@@ -30,6 +36,8 @@ import {
   UsersRound,
   Video,
   X,
+  ZoomIn,
+  ZoomOut,
   Zap
 } from 'lucide-react';
 import './styles.css';
@@ -213,6 +221,11 @@ type GroupMessage = {
     previewUrl: string;
     fullUrl: string;
   };
+  emoji?: {
+    localId: number;
+    previewUrl: string;
+    fullUrl: string;
+  };
 };
 
 type GroupDetail = {
@@ -295,13 +308,13 @@ type MomentsResponse = {
 type MediaItem = GroupMessage & {
   chatId: string;
   chatName: string;
-  chatType: 'group' | 'private';
+  chatType: 'group' | 'private' | 'moments';
   sourceLabel: string;
 };
 
 type MediaResponse = {
   range: { since: string; until: string };
-  source: 'group' | 'private' | 'all';
+  source: 'group' | 'private' | 'moments' | 'all';
   type: 'image' | 'video' | 'all';
   total: number;
   metrics: {
@@ -371,7 +384,7 @@ type AppModule = 'group' | 'private' | 'moments' | 'media';
 type View = 'dashboard' | 'feed' | 'radar' | 'links' | 'groups' | 'groupDetail' | 'privateList' | 'privateDetail' | 'moments' | 'media' | 'settings';
 type RangePreset = '日' | '周' | '月' | '季' | '年' | '自定义';
 type SyncCadence = '自动' | '时' | '日' | '周';
-type MediaSource = 'all' | 'group' | 'private';
+type MediaSource = 'all' | 'group' | 'private' | 'moments';
 type MediaKind = 'all' | 'image' | 'video';
 
 const periodOptions: RangePreset[] = ['日', '周', '月', '季', '年', '自定义'];
@@ -599,6 +612,7 @@ function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ since: range.since, until: range.until, days: rangeDays(range), scope: moduleToSyncScope(module) })
     });
+    await waitForSyncComplete();
     await reloadCurrentViews(range);
   }
 
@@ -609,7 +623,22 @@ function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope: moduleToSyncScope(module) })
     });
+    await waitForSyncComplete();
     await reloadCurrentViews(range);
+  }
+
+  async function waitForSyncComplete() {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 10 * 60 * 1000) {
+      const response = await fetch('/api/sync/status');
+      const sync = (await response.json()) as SyncStatus;
+      setSyncing(sync.running);
+      setDashboard((current) => current ? { ...current, sync } : current);
+      if (!sync.running) return sync;
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
+    setSyncing(false);
+    return null;
   }
 
   function openModule(nextModule: AppModule) {
@@ -750,6 +779,8 @@ function App() {
       : module === 'media'
         ? `${range.since} ~ ${range.until} · ${media?.total ?? 0} 个媒体`
         : view === 'groups' ? `${groupScope.label} · ${groupList?.total ?? 0} 个群` : view === 'groupDetail' ? `${groupDetail?.group.collection || ''} · ${groupDetail?.group.lastMessageAt || ''}` : scope.type === 'all' ? rangeLabel : `${rangeLabel} · ${scope.label}`;
+  const syncLabel = module === 'media' ? '同步影萃' : `同步${moduleLabel(module)}`;
+  const rescanLabel = module === 'media' ? '刷新影萃' : `${moduleLabel(module)}重扫`;
 
   return (
     <main className="page-shell">
@@ -852,11 +883,11 @@ function App() {
             <Segmented options={syncCadenceOptions} active={syncCadence} onChange={setSyncCadence} ariaLabel="自动同步频率" compact />
             <button className="secondary-button" onClick={startFullSync} disabled={syncing}>
               <Database size={17} />
-              全量同步
+              {syncLabel}
             </button>
             <button className="primary-button" onClick={() => void runIncrementalSync()} disabled={syncing}>
               {syncing ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-              重扫
+              {rescanLabel}
             </button>
           </div>
         </header>
@@ -912,7 +943,21 @@ function App() {
                   void loadMedia(range, mediaSource, value, mediaQuery);
                 }}
                 onSearch={() => loadMedia(range, mediaSource, mediaKind, mediaQuery)}
-                onOpenChat={(item) => item.chatType === 'private' ? openPrivateDetail(item.chatId) : openGroupDetail(item.chatId)}
+                onOpenChat={(item) => {
+                  if (item.chatType === 'private') {
+                    openPrivateDetail(item.chatId);
+                    return;
+                  }
+                  if (item.chatType === 'moments') {
+                    setModule('moments');
+                    setView('moments');
+                    setMomentQuery(mediaQuery);
+                    setMomentAuthor('');
+                    void loadMoments(range, mediaQuery, '');
+                    return;
+                  }
+                  openGroupDetail(item.chatId);
+                }}
                 onPreviewImage={setPreviewImage}
                 onPreviewVideo={setPreviewVideo}
               />
@@ -1248,6 +1293,7 @@ function GroupDetailView({
 }) {
   const [previewImage, setPreviewImage] = useState<GroupMessage | null>(null);
   const [previewVideo, setPreviewVideo] = useState<GroupMessage | null>(null);
+  const [previewEmoji, setPreviewEmoji] = useState<GroupMessage | null>(null);
 
   if (!detail) {
     return <div className="loading-panel"><Loader2 className="spin" size={22} />正在读取群详情</div>;
@@ -1301,15 +1347,16 @@ function GroupDetailView({
 
       <section className="panel group-tab-panel">
         {tab === 'members' ? <MemberTable members={detail.members} /> : null}
-        {tab === 'messages' ? <GroupMessageList messages={detail.messages} empty="暂无消息。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} /> : null}
-        {tab === 'files' ? <GroupMessageList messages={detail.files} empty="暂无文件。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} /> : null}
+        {tab === 'messages' ? <GroupMessageList messages={detail.messages} empty="暂无消息。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} onPreviewEmoji={setPreviewEmoji} /> : null}
+        {tab === 'files' ? <GroupMessageList messages={detail.files} empty="暂无文件。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} onPreviewEmoji={setPreviewEmoji} /> : null}
         {tab === 'links' ? <GroupLinkList messages={detail.links} /> : null}
-        {tab === 'videos' ? <GroupMessageList messages={detail.videos} empty="暂无视频。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} /> : null}
-        {tab === 'images' ? <GroupMessageList messages={detail.images} empty="暂无图片。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} /> : null}
+        {tab === 'videos' ? <GroupMessageList messages={detail.videos} empty="暂无视频。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} onPreviewEmoji={setPreviewEmoji} /> : null}
+        {tab === 'images' ? <GroupMessageList messages={detail.images} empty="暂无图片。" onPreviewImage={setPreviewImage} onPreviewVideo={setPreviewVideo} onPreviewEmoji={setPreviewEmoji} /> : null}
       </section>
 
       {previewImage ? <ImageLightbox message={previewImage} onClose={() => setPreviewImage(null)} /> : null}
       {previewVideo ? <VideoLightbox message={previewVideo} onClose={() => setPreviewVideo(null)} /> : null}
+      {previewEmoji ? <EmojiLightbox message={previewEmoji} onClose={() => setPreviewEmoji(null)} /> : null}
     </>
   );
 }
@@ -1361,18 +1408,20 @@ function GroupMessageList({
   messages,
   empty,
   onPreviewImage,
-  onPreviewVideo
+  onPreviewVideo,
+  onPreviewEmoji
 }: {
   messages: GroupMessage[];
   empty: string;
   onPreviewImage?: (message: GroupMessage) => void;
   onPreviewVideo?: (message: GroupMessage) => void;
+  onPreviewEmoji?: (message: GroupMessage) => void;
 }) {
   if (messages.length === 0) return <div className="empty-state">{empty}</div>;
   return (
     <div className="group-message-list">
       {messages.map((message) => (
-        <article className={`group-message-row ${message.image || message.video || message.file || message.link ? 'media-message-row' : ''}`} key={message.id}>
+        <article className={`group-message-row ${message.image || message.video || message.emoji || message.file || message.link ? 'media-message-row' : ''}`} key={message.id}>
           <span className="feed-time">{message.time}</span>
           <span className="feed-main">
             <span className="feed-title-line">
@@ -1386,15 +1435,9 @@ function GroupMessageList({
             {message.image ? (
               <ImagePreviewCard message={message} onPreview={() => onPreviewImage?.(message)} />
             ) : message.video ? (
-              <button className="video-preview-card" type="button" onClick={() => onPreviewVideo?.(message)}>
-                <span className="video-preview-thumb">
-                  <Video size={34} />
-                </span>
-                <span className="video-preview-copy">
-                  <strong>视频消息</strong>
-                  <small>点击播放 · local_id={message.video.localId}</small>
-                </span>
-              </button>
+              <VideoPreviewCard message={message} onPreview={() => onPreviewVideo?.(message)} />
+            ) : message.emoji ? (
+              <EmojiPreviewCard message={message} onPreview={() => onPreviewEmoji?.(message)} />
             ) : message.file ? (
               <a className="file-preview-card" href={message.file.downloadUrl} download>
                 <span className="file-preview-icon">
@@ -1425,6 +1468,34 @@ function GroupMessageList({
           </span>
         </article>
       ))}
+    </div>
+  );
+}
+
+function EmojiLightbox({ message, onClose }: { message: GroupMessage; onClose: () => void }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="表情预览" onClick={onClose}>
+      <div className="image-lightbox-inner emoji-lightbox-inner" onClick={(event) => event.stopPropagation()}>
+        <div className="image-lightbox-bar">
+          <span>
+            <strong>{message.sender}</strong>
+            <small>{message.time} · local_id={message.emoji?.localId}</small>
+          </span>
+          <button className="icon-button" type="button" aria-label="关闭表情预览" onClick={onClose}>
+            <X size={20} />
+          </button>
+        </div>
+        {failed ? (
+          <div className="video-unavailable">
+            <Sparkles size={34} />
+            <strong>暂时无法预览该表情</strong>
+            <span>本机缓存或微信表情源没有返回可渲染资源。</span>
+          </div>
+        ) : (
+          <img src={message.emoji?.fullUrl} alt={`${message.sender} 发送的表情`} onError={() => setFailed(true)} />
+        )}
+      </div>
     </div>
   );
 }
@@ -1478,6 +1549,49 @@ function ImagePreviewCard({ message, onPreview }: { message: GroupMessage; onPre
   );
 }
 
+function EmojiPreviewCard({ message, onPreview }: { message: GroupMessage; onPreview: () => void }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <button className="emoji-preview-card" type="button" onClick={onPreview}>
+      {failed ? (
+        <span className="emoji-preview-fallback">
+          <Sparkles size={24} />
+          <strong>表情消息</strong>
+          <small>本机暂未解析到预览</small>
+        </span>
+      ) : (
+        <img src={message.emoji?.previewUrl} alt={`${message.sender} 发送的表情`} loading="lazy" onError={() => setFailed(true)} />
+      )}
+      <span className="image-preview-meta">
+        <Sparkles size={15} />
+        local_id={message.emoji?.localId}
+      </span>
+    </button>
+  );
+}
+
+function VideoPreviewCard({ message, onPreview }: { message: GroupMessage; onPreview: () => void }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <button className={`video-preview-card ${failed ? 'is-missing-thumb' : ''}`} type="button" onClick={onPreview}>
+      <span className="video-preview-thumb">
+        {failed ? (
+          <Video size={34} />
+        ) : (
+          <>
+            <img src={message.video?.previewUrl} alt={`${message.sender} 发送的视频缩略图`} loading="lazy" onError={() => setFailed(true)} />
+            <span className="video-play-mark"><Play size={22} fill="currentColor" /></span>
+          </>
+        )}
+      </span>
+      <span className="video-preview-copy">
+        <strong>视频消息</strong>
+        <small>{failed ? '未找到缩略图 · ' : '点击播放 · '}local_id={message.video?.localId}</small>
+      </span>
+    </button>
+  );
+}
+
 function VideoLightbox({ message, onClose }: { message: GroupMessage; onClose: () => void }) {
   const [failed, setFailed] = useState(false);
   return (
@@ -1499,7 +1613,7 @@ function VideoLightbox({ message, onClose }: { message: GroupMessage; onClose: (
             <span>请先在微信里打开或下载这条视频后，再回到看板重试。</span>
           </div>
         ) : (
-          <video src={message.video?.fullUrl} controls autoPlay playsInline onError={() => setFailed(true)} />
+          <video src={message.video?.fullUrl} poster={message.video?.previewUrl} controls autoPlay playsInline onError={() => setFailed(true)} />
         )}
       </div>
     </div>
@@ -1633,25 +1747,51 @@ function MomentsView({
 }
 
 function MomentMediaGrid({ media, momentId }: { media: MomentMedia[]; momentId: string }) {
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const visible = media.filter((item) => item.thumb || item.url).slice(0, 9);
+  const activeItem = previewIndex === null ? null : visible[previewIndex] || null;
+
+  useEffect(() => {
+    if (previewIndex === null) return undefined;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setPreviewIndex(null);
+      if (event.key === 'ArrowLeft') setPreviewIndex((current) => current === null ? current : (current + visible.length - 1) % visible.length);
+      if (event.key === 'ArrowRight') setPreviewIndex((current) => current === null ? current : (current + 1) % visible.length);
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [previewIndex, visible.length]);
+
   if (visible.length === 0) return null;
   return (
-    <div className={`moment-media-grid count-${Math.min(visible.length, 4)}`}>
-      {visible.map((item, index) => (
-        <MomentMediaTile item={item} momentId={momentId} index={index} key={`${item.thumb || item.url}-${index}`} />
-      ))}
-    </div>
+    <>
+      <div className={`moment-media-grid count-${Math.min(visible.length, 4)}`}>
+        {visible.map((item, index) => (
+          <MomentMediaTile item={item} momentId={momentId} index={index} key={`${item.thumb || item.url}-${index}`} onOpen={() => setPreviewIndex(index)} />
+        ))}
+      </div>
+      {activeItem ? (
+        <MomentMediaPreview
+          item={activeItem}
+          momentId={momentId}
+          index={previewIndex ?? 0}
+          total={visible.length}
+          onClose={() => setPreviewIndex(null)}
+          onPrev={() => setPreviewIndex((current) => current === null ? current : (current + visible.length - 1) % visible.length)}
+          onNext={() => setPreviewIndex((current) => current === null ? current : (current + 1) % visible.length)}
+        />
+      ) : null}
+    </>
   );
 }
 
-function MomentMediaTile({ item, momentId, index }: { item: MomentMedia; momentId: string; index: number }) {
+function MomentMediaTile({ item, momentId, index, onOpen }: { item: MomentMedia; momentId: string; index: number; onOpen: () => void }) {
   const [failed, setFailed] = useState(false);
   const isVideo = isMomentVideo(item);
   const thumb = `/api/moments/${encodeURIComponent(momentId)}/media/${index}?variant=thumb`;
-  const href = `/api/moments/${encodeURIComponent(momentId)}/media/${index}?variant=full`;
   const meta = formatMomentMediaMeta(item);
   return (
-    <a className={`moment-media-tile ${isVideo ? 'video' : ''}`} href={href} target="_blank" rel="noreferrer" aria-label={`打开朋友圈媒体 ${index + 1}`}>
+    <button className={`moment-media-tile ${isVideo ? 'video' : ''}`} type="button" onClick={onOpen} aria-label={`预览朋友圈媒体 ${index + 1}`}>
       {!failed ? (
         <img src={thumb} alt={`朋友圈媒体 ${index + 1}`} loading="lazy" onError={() => setFailed(true)} />
       ) : (
@@ -1668,7 +1808,167 @@ function MomentMediaTile({ item, momentId, index }: { item: MomentMedia; momentI
           <Video size={16} />
         </span>
       ) : null}
-    </a>
+    </button>
+  );
+}
+
+function MomentMediaPreview({
+  item,
+  momentId,
+  index,
+  total,
+  onClose,
+  onPrev,
+  onNext
+}: {
+  item: MomentMedia;
+  momentId: string;
+  index: number;
+  total: number;
+  onClose: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const [zoomPercent, setZoomPercent] = useState(100);
+  const [rotation, setRotation] = useState(0);
+  const [naturalSize, setNaturalSize] = useState(() => ({
+    width: Number(item.width) || 0,
+    height: Number(item.height) || 0
+  }));
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const isVideo = isMomentVideo(item);
+  const fullUrl = `/api/moments/${encodeURIComponent(momentId)}/media/${index}?variant=full`;
+  const meta = formatMomentMediaMeta(item);
+  const downloadName = buildMomentMediaDownloadName(momentId, index, isVideo);
+
+  useEffect(() => {
+    setFailed(false);
+    setZoomPercent(100);
+    setRotation(0);
+    setNaturalSize({
+      width: Number(item.width) || 0,
+      height: Number(item.height) || 0
+    });
+    requestAnimationFrame(() => viewportRef.current?.scrollTo({ top: 0, left: 0 }));
+  }, [fullUrl, item.height, item.width]);
+
+  function zoomBy(delta: number) {
+    setZoomPercent((current) => clampNumber(current + delta, 25, 500));
+  }
+
+  function fitToWidth() {
+    setZoomPercent(100);
+    requestAnimationFrame(() => viewportRef.current?.scrollTo({ top: 0, left: 0 }));
+  }
+
+  function centerImageStage() {
+    requestAnimationFrame(() => {
+      const stage = viewportRef.current;
+      if (!stage) return;
+      stage.scrollTo({
+        left: Math.max(0, (stage.scrollWidth - stage.clientWidth) / 2),
+        top: Math.max(0, (stage.scrollHeight - stage.clientHeight) / 2)
+      });
+    });
+  }
+
+  function rotateImage(delta: number) {
+    setRotation((current) => (current + delta + 360) % 360);
+    centerImageStage();
+  }
+
+  function showActualSize() {
+    const naturalWidth = naturalSize.width || Number(item.width) || 0;
+    const viewportWidth = viewportRef.current?.clientWidth || 0;
+    if (!naturalWidth || !viewportWidth) {
+      setZoomPercent(100);
+      return;
+    }
+    setZoomPercent(clampNumber(Math.round((naturalWidth / viewportWidth) * 100), 25, 500));
+  }
+
+  const imageStyle: React.CSSProperties = {
+    width: `${zoomPercent}%`,
+    transform: `rotate(${rotation}deg)`
+  };
+
+  return (
+    <div className="image-lightbox moment-media-modal" role="dialog" aria-modal="true" aria-label="朋友圈媒体预览" onClick={onClose}>
+      <div className={`image-lightbox-inner moment-media-modal-inner ${isVideo ? 'video' : 'image'}`} onClick={(event) => event.stopPropagation()}>
+        <div className="image-lightbox-bar moment-media-preview-bar">
+          <span className="moment-media-preview-title">
+            <strong>{isVideo ? '视频预览' : '图片预览'}</strong>
+            <small>{index + 1} / {total} · {meta}{!isVideo ? ` · ${zoomPercent}%` : ''}</small>
+          </span>
+          <div className="moment-media-preview-tools">
+            {!isVideo ? (
+              <>
+                <button className="icon-button" type="button" title="缩小" aria-label="缩小图片" disabled={zoomPercent <= 25} onClick={() => zoomBy(-25)}>
+                  <ZoomOut size={18} />
+                </button>
+                <output className="moment-media-zoom" aria-label="当前缩放比例">{zoomPercent}%</output>
+                <button className="icon-button" type="button" title="放大" aria-label="放大图片" disabled={zoomPercent >= 500} onClick={() => zoomBy(25)}>
+                  <ZoomIn size={18} />
+                </button>
+                <button className="icon-button" type="button" title="适应宽度" aria-label="图片适应宽度" onClick={fitToWidth}>
+                  <Maximize2 size={18} />
+                </button>
+                <button className="icon-button text-tool" type="button" title="原始尺寸" aria-label="按原始尺寸查看图片" onClick={showActualSize}>
+                  1:1
+                </button>
+                <button className="icon-button" type="button" title="向左旋转" aria-label="向左旋转图片" onClick={() => rotateImage(-90)}>
+                  <RotateCcw size={18} />
+                </button>
+                <button className="icon-button" type="button" title="向右旋转" aria-label="向右旋转图片" onClick={() => rotateImage(90)}>
+                  <RotateCw size={18} />
+                </button>
+              </>
+            ) : null}
+            <a className="icon-button" href={fullUrl} download={downloadName} title={isVideo ? '下载视频' : '下载图片'} aria-label={isVideo ? '下载视频' : '下载图片'}>
+              <Download size={18} />
+            </a>
+            <button className="icon-button" type="button" aria-label="关闭媒体预览" onClick={onClose}>
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+        {failed ? (
+          <div className="video-unavailable">
+            {isVideo ? <Video size={34} /> : <ImageIcon size={34} />}
+            <strong>暂时无法预览该媒体</strong>
+            <span>本机缓存或微信媒体源没有返回可渲染资源。</span>
+          </div>
+        ) : isVideo ? (
+          <video src={fullUrl} controls autoPlay playsInline onError={() => setFailed(true)} />
+        ) : (
+          <div className="moment-media-image-stage" ref={viewportRef}>
+            <img
+              className="moment-media-preview-image"
+              src={fullUrl}
+              alt={`朋友圈图片 ${index + 1}`}
+              style={imageStyle}
+              draggable={false}
+              onError={() => setFailed(true)}
+              onLoad={(event) => {
+                const image = event.currentTarget;
+                setNaturalSize({ width: image.naturalWidth, height: image.naturalHeight });
+              }}
+            />
+          </div>
+        )}
+        {total > 1 ? (
+          <>
+            <button className="moment-media-nav prev" type="button" aria-label="上一张媒体" onClick={onPrev}>
+              <ChevronLeft size={24} />
+            </button>
+            <button className="moment-media-nav next" type="button" aria-label="下一张媒体" onClick={onNext}>
+              <ChevronRight size={24} />
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -1682,6 +1982,11 @@ function formatMomentMediaMeta(item: MomentMedia) {
   if (item.width && item.height) return `${item.width} x ${item.height}`;
   if (item.total_size) return formatBytes(Number(item.total_size));
   return '朋友圈媒体';
+}
+
+function buildMomentMediaDownloadName(momentId: string, index: number, isVideo: boolean) {
+  const safeId = momentId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'moment';
+  return `weicui-${safeId}-${index + 1}.${isVideo ? 'mp4' : 'jpg'}`;
 }
 
 function MediaView({
@@ -1710,9 +2015,9 @@ function MediaView({
   onPreviewVideo: (message: GroupMessage) => void;
 }) {
   const metrics: Metric[] = [
-    { label: '图片', value: formatCompact(media?.metrics.images ?? 0), hint: '聊天图片', tone: 'mint' },
-    { label: '视频', value: formatCompact(media?.metrics.videos ?? 0), hint: '聊天视频', tone: 'amber' },
-    { label: '会话', value: formatCompact(media?.metrics.chats ?? 0), hint: '群聊 + 私聊', tone: 'neutral' },
+    { label: '图片', value: formatCompact(media?.metrics.images ?? 0), hint: '聊天 / 朋友圈图片', tone: 'mint' },
+    { label: '视频', value: formatCompact(media?.metrics.videos ?? 0), hint: '聊天 / 朋友圈视频', tone: 'amber' },
+    { label: '会话', value: formatCompact(media?.metrics.chats ?? 0), hint: '群聊 + 私聊 + 朋友圈', tone: 'neutral' },
     { label: '发送者', value: formatCompact(media?.metrics.senders ?? 0), hint: '素材来源', tone: 'neutral' }
   ];
 
@@ -1738,7 +2043,7 @@ function MediaView({
       </section>
 
       <section className="filter-row">
-        <Segmented options={['all', 'group', 'private'] as MediaSource[]} active={source} onChange={setSource} ariaLabel="媒体来源" />
+        <Segmented options={['all', 'group', 'private', 'moments'] as MediaSource[]} active={source} onChange={setSource} ariaLabel="媒体来源" />
         <Segmented options={['all', 'image', 'video'] as MediaKind[]} active={kind} onChange={setKind} ariaLabel="媒体类型" />
       </section>
 
@@ -1751,20 +2056,14 @@ function MediaView({
           <h3><ImageIcon size={18} />媒体卡片</h3>
           <span>{media?.total ?? 0} 个</span>
         </div>
-        {(media?.items ?? []).length === 0 ? <div className="empty-state">暂无媒体索引，完成群萃或私萃同步后自动显示。</div> : null}
+        {(media?.items ?? []).length === 0 ? <div className="empty-state">暂无媒体索引，完成群萃、私萃或圈萃同步后自动显示。</div> : null}
         <div className="media-grid">
           {(media?.items ?? []).map((item) => (
             <article className="media-card" key={item.id}>
               {item.image ? (
                 <ImagePreviewCard message={item} onPreview={() => onPreviewImage(item)} />
               ) : item.video ? (
-                <button className="video-preview-card" type="button" onClick={() => onPreviewVideo(item)}>
-                  <span className="video-preview-thumb"><Video size={34} /></span>
-                  <span className="video-preview-copy">
-                    <strong>视频消息</strong>
-                    <small>点击播放 · local_id={item.video.localId}</small>
-                  </span>
-                </button>
+                <VideoPreviewCard message={item} onPreview={() => onPreviewVideo(item)} />
               ) : null}
               <div className="media-card-body">
                 <strong>{item.chatName}</strong>
@@ -2334,6 +2633,7 @@ function segmentLabel(value: string) {
     all: '全部',
     group: '群聊',
     private: '私聊',
+    moments: '朋友圈',
     image: '图片',
     video: '视频'
   };
@@ -2421,6 +2721,10 @@ function readSyncCadence(): SyncCadence {
 
 function formatCompact(value: number) {
   return new Intl.NumberFormat('zh-CN', { notation: value > 9999 ? 'compact' : 'standard' }).format(value);
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function formatBytes(value: number) {

@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import Database from 'better-sqlite3';
+import type BetterSqlite3 from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,7 +35,11 @@ export async function resolveMessageImage(messageId: string): Promise<MessageIma
 }
 
 export async function resolveMessageVideo(messageId: string): Promise<MessageImage | null> {
-  return resolveMessageMedia(messageId, 'video');
+  return resolveMessageVideoAsset(messageId, 'full');
+}
+
+export async function resolveMessageVideoThumbnail(messageId: string): Promise<MessageImage | null> {
+  return resolveMessageVideoAsset(messageId, 'thumb');
 }
 
 export async function resolveMessageFile(messageId: string): Promise<MessageFile | null> {
@@ -90,6 +96,105 @@ async function resolveMessageMedia(messageId: string, kind: 'image' | 'video'): 
     mime: detectMime(filePath, kind),
     localId
   };
+}
+
+async function resolveMessageVideoAsset(messageId: string, variant: 'full' | 'thumb'): Promise<MessageImage | null> {
+  const message = db.prepare(`
+    SELECT id, group_id, sent_at, type, content, raw_json
+    FROM messages
+    WHERE id = ?
+  `).get(messageId) as MessageRow | undefined;
+  if (!message || !matchesKind(message, 'video')) return null;
+
+  const raw = parseRawJson(message.raw_json);
+  const localId = readLocalId(raw, message.content);
+  if (!localId) return null;
+  const timestamp = readTimestamp(raw, message.sent_at);
+  if (!timestamp) return null;
+
+  const root = getWeChatFilesRoot();
+  if (!root) return null;
+  const digest = findVideoDigest(message.group_id, localId, timestamp);
+  if (!digest) return null;
+
+  const month = monthFromTimestamp(timestamp);
+  const videoDir = path.join(root, 'msg', 'video', month);
+  const filePath = variant === 'full'
+    ? firstExistingFile(videoDir, [`${digest}.mp4`, `${digest}_raw.mp4`])
+    : firstExistingFile(videoDir, [`${digest}_thumb.jpg`, `${digest}.jpg`, `${digest}_thumb.png`, `${digest}.png`]);
+  if (!filePath || !isPathInside(videoDir, filePath)) return null;
+
+  return {
+    path: filePath,
+    mime: detectMime(filePath, variant === 'full' ? 'video' : 'image'),
+    localId
+  };
+}
+
+function findVideoDigest(chatId: string, localId: number, timestamp: number) {
+  const cacheDb = openMessageResourceCache();
+  if (!cacheDb) return '';
+  try {
+    const row = cacheDb.prepare(`
+      SELECT i.packed_info AS packedInfo
+      FROM MessageResourceInfo i
+      JOIN ChatName2Id c ON c.rowid = i.chat_id
+      WHERE c.user_name = ?
+        AND i.message_local_id = ?
+        AND i.message_create_time = ?
+        AND i.message_local_type = 43
+      LIMIT 1
+    `).get(chatId, localId, timestamp) as { packedInfo?: Buffer | string } | undefined;
+    return extractDigest(row?.packedInfo);
+  } catch {
+    return '';
+  } finally {
+    cacheDb.close();
+  }
+}
+
+function openMessageResourceCache(): BetterSqlite3.Database | null {
+  const cacheDir = path.join(os.homedir(), '.wx-cli', 'cache');
+  if (!fs.existsSync(cacheDir)) return null;
+  for (const fileName of fs.readdirSync(cacheDir)) {
+    if (!fileName.endsWith('.db')) continue;
+    const filePath = path.join(cacheDir, fileName);
+    let cacheDb: BetterSqlite3.Database | null = null;
+    try {
+      cacheDb = new Database(filePath, { readonly: true, fileMustExist: true });
+      const tables = cacheDb.prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('MessageResourceInfo', 'MessageResourceDetail', 'ChatName2Id')
+      `).all() as Array<{ name: string }>;
+      if (tables.length === 3) return cacheDb;
+      cacheDb.close();
+    } catch {
+      cacheDb?.close();
+      // Try the next wx-cli cache database.
+    }
+  }
+  return null;
+}
+
+function extractDigest(value: Buffer | string | undefined) {
+  if (!value) return '';
+  const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
+  return text.match(/[a-f0-9]{32}/i)?.[0].toLowerCase() || '';
+}
+
+function firstExistingFile(baseDir: string, names: string[]) {
+  for (const name of names) {
+    const filePath = path.join(baseDir, name);
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile() && fs.statSync(filePath).size > 0) return filePath;
+  }
+  return '';
+}
+
+function isPathInside(baseDir: string, filePath: string) {
+  const relative = path.relative(baseDir, filePath);
+  return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 async function resolveAttachmentId(groupId: string, localId: number, timestamp: number, kind: 'image' | 'video') {
@@ -162,6 +267,12 @@ function monthFromTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0, 7);
   return date.toISOString().slice(0, 7);
+}
+
+function monthFromTimestamp(timestamp: number) {
+  const date = new Date(timestamp * 1000);
+  if (Number.isNaN(date.getTime())) return monthFromTime('');
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
 function readLocalId(raw: Record<string, unknown>, content: string) {

@@ -1,4 +1,4 @@
-import { getContactProfile } from './contacts.js';
+import { getContactProfile, getMessageSenderProfile } from './contacts.js';
 import { db } from './db.js';
 
 export type GroupScope = 'all' | 'favorite' | 'ungrouped' | 'collection' | 'active' | 'silent';
@@ -181,7 +181,11 @@ export function getPrivateChats(params: { query?: string }) {
     LEFT JOIN signals s ON s.message_id = m.id
     WHERE ${parts.join(' AND ')}
     GROUP BY g.id
-    ORDER BY datetime(g.last_message_at) DESC, message_count DESC, g.name ASC
+    ORDER BY
+      CASE WHEN COUNT(m.id) > 0 THEN 0 ELSE 1 END,
+      datetime(g.last_message_at) DESC,
+      message_count DESC,
+      g.name ASC
     LIMIT 200
   `).all(...args) as GroupRow[];
 
@@ -454,6 +458,7 @@ function toLatestMessage(row: GroupRow) {
   if (!row.last_message_id) return null;
   return toMessage({
     id: row.last_message_id,
+    groupId: row.id,
     sender: row.last_message_sender || '',
     sentAt: row.last_message_sent_at || '',
     type: row.last_message_type || '',
@@ -485,10 +490,17 @@ export function toMessage(row: Record<string, unknown>) {
   const raw = parseRawMessage(rawJson);
   const imageLocalId = extractMediaLocalId('image', type, content, rawJson, id);
   const videoLocalId = extractMediaLocalId('video', type, content, rawJson, id);
+  const emojiLocalId = extractEmojiLocalId(type, content, rawJson, id);
   const link = extractLinkInfo(content, raw);
   const file = extractFileInfo(content, id);
   const rawSender = String(row.sender || '未知成员');
-  const senderProfile = getContactProfile(rawSender, rawSender);
+  const senderProfile = getMessageSenderProfile(rawSender, rawSender, {
+    groupId: String(row.groupId || ''),
+    messageId: id,
+    sentAt: String(row.sentAt || ''),
+    content,
+    rawJson
+  });
   return {
     id,
     sender: senderProfile.displayName,
@@ -509,8 +521,13 @@ export function toMessage(row: Record<string, unknown>) {
     } : undefined,
     video: videoLocalId ? {
       localId: videoLocalId,
-      previewUrl: `/api/messages/${encodeURIComponent(id)}/video`,
+      previewUrl: `/api/messages/${encodeURIComponent(id)}/video/thumb`,
       fullUrl: `/api/messages/${encodeURIComponent(id)}/video`
+    } : undefined,
+    emoji: emojiLocalId ? {
+      localId: emojiLocalId,
+      previewUrl: `/api/messages/${encodeURIComponent(id)}/emoji`,
+      fullUrl: `/api/messages/${encodeURIComponent(id)}/emoji`
     } : undefined
   };
 }
@@ -625,6 +642,22 @@ function extractMediaLocalId(kind: 'image' | 'video', type: string, content: str
     if (typeof direct === 'string' && /^\d+$/.test(direct)) return Number(direct);
   } catch {
     // fall back to content parsing below
+  }
+  const match = content.match(/local_id=(\d+)/i);
+  if (match) return Number(match[1]);
+  return /^\d+$/.test(id) ? Number(id) : 0;
+}
+
+function extractEmojiLocalId(type: string, content: string, rawJson: string, id: string) {
+  const isMatch = /表情|emoji|emoticon/i.test(type) || /\[表情\]/.test(content);
+  if (!isMatch) return 0;
+  try {
+    const raw = rawJson ? JSON.parse(rawJson) as Record<string, unknown> : {};
+    const direct = raw.local_id ?? raw.localId ?? raw.id;
+    if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
+    if (typeof direct === 'string' && /^\d+$/.test(direct)) return Number(direct);
+  } catch {
+    // fall back to the message id below
   }
   const match = content.match(/local_id=(\d+)/i);
   if (match) return Number(match[1]);

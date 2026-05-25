@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { zstdDecompressSync } from 'node:zlib';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -24,6 +25,14 @@ type ContactRow = {
   display_name: string;
   avatar_url: string | null;
   source: string;
+};
+
+type MessageSenderContext = {
+  groupId?: string;
+  messageId?: string;
+  sentAt?: string;
+  content?: string;
+  rawJson?: string;
 };
 
 export type PublicContactProfile = {
@@ -275,6 +284,189 @@ export function getContactProfile(identifier: string, fallbackName = ''): Public
     resolved,
     subtitle: resolved ? (remarkName ? '备注名' : nickname ? '微信昵称' : row?.source || '本地资料') : '本地资料未解析'
   };
+}
+
+export function getMessageSenderProfile(identifier: string, fallbackName = '', context: MessageSenderContext = {}) {
+  const raw = parseRawJson(context.rawJson || '');
+  const directUsername = firstString(raw, [
+    'sender_username',
+    'from_username',
+    'from_user_name',
+    'real_sender',
+    'real_sender_username',
+    'wxid'
+  ]);
+  const resolvedUsername = directUsername && isRawIdentifier(directUsername)
+    ? directUsername
+    : resolveGroupSenderUsername({
+      groupId: context.groupId || firstString(raw, ['chat', 'username']),
+      messageId: context.messageId || '',
+      sentAt: context.sentAt || '',
+      content: context.content || firstString(raw, ['content', 'text', 'message']),
+      raw
+    });
+
+  if (resolvedUsername) return getContactProfile(resolvedUsername, fallbackName || identifier);
+  return getContactProfile(identifier, fallbackName);
+}
+
+const wxSenderCache = new Map<string, string>();
+const zstdMagic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+
+function resolveGroupSenderUsername(context: {
+  groupId: string;
+  messageId: string;
+  sentAt: string;
+  content: string;
+  raw: AnyRecord;
+}) {
+  if (!context.groupId?.endsWith('@chatroom')) return '';
+
+  const localId = readLocalId(context.raw, context.content, context.messageId);
+  const timestamp = readTimestamp(context.raw, context.sentAt);
+  const cacheKey = [
+    context.groupId,
+    localId || '',
+    timestamp || '',
+    context.messageId || '',
+    cryptoHash(context.content)
+  ].join('|');
+  if (wxSenderCache.has(cacheKey)) return wxSenderCache.get(cacheKey) || '';
+
+  const resolved = findSenderUsernameInWxCache(localId, timestamp, context.content);
+  wxSenderCache.set(cacheKey, resolved);
+  return resolved;
+}
+
+function findSenderUsernameInWxCache(localId: number, timestamp: number, content: string) {
+  for (const file of listWxCacheDatabases()) {
+    let cacheDb: Database.Database | undefined;
+    try {
+      cacheDb = new Database(file, { readonly: true, fileMustExist: true });
+      const hasNameTable = Boolean(cacheDb.prepare(`
+        SELECT 1 AS ok
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'Name2Id'
+        LIMIT 1
+      `).get());
+      if (!hasNameTable) continue;
+
+      const tables = cacheDb.prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name LIKE 'Msg_%'
+      `).all() as Array<{ name: string }>;
+
+      for (const table of tables) {
+        const rows = querySenderRows(cacheDb, table.name, localId, timestamp);
+        for (const row of rows) {
+          if (!localId && !messageContentMatches(row.message_content, content)) continue;
+          const username = senderUsernameById(cacheDb, Number(row.real_sender_id || 0));
+          if (username) return username;
+        }
+      }
+    } catch {
+      // Ignore non-message cache shards.
+    } finally {
+      cacheDb?.close();
+    }
+  }
+  return '';
+}
+
+function querySenderRows(cacheDb: Database.Database, table: string, localId: number, timestamp: number) {
+  try {
+    if (localId) {
+      const row = cacheDb.prepare(`
+        SELECT local_id, real_sender_id, create_time, message_content
+        FROM ${quoteIdentifier(table)}
+        WHERE local_id = ?
+        LIMIT 1
+      `).get(localId) as AnyRecord | undefined;
+      return row ? [row] : [];
+    }
+    if (!timestamp) return [];
+    return cacheDb.prepare(`
+      SELECT local_id, real_sender_id, create_time, message_content
+      FROM ${quoteIdentifier(table)}
+      WHERE create_time BETWEEN ? AND ?
+      ORDER BY local_id DESC
+      LIMIT 20
+    `).all(timestamp - 1, timestamp + 1) as AnyRecord[];
+  } catch {
+    return [];
+  }
+}
+
+function senderUsernameById(cacheDb: Database.Database, senderId: number) {
+  if (!senderId) return '';
+  try {
+    const row = cacheDb.prepare('SELECT user_name FROM Name2Id WHERE rowid = ?').get(senderId) as { user_name?: string } | undefined;
+    return row?.user_name || '';
+  } catch {
+    return '';
+  }
+}
+
+function messageContentMatches(value: unknown, content: string) {
+  const needle = content.trim();
+  if (!needle) return true;
+  const decoded = decodeMessageContent(value);
+  if (!decoded) return false;
+  if (decoded.includes(needle)) return true;
+  const compactNeedle = needle.replace(/\s+/g, ' ').slice(0, 80);
+  return Boolean(compactNeedle && decoded.replace(/\s+/g, ' ').includes(compactNeedle));
+}
+
+function decodeMessageContent(value: unknown) {
+  if (!value) return '';
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  try {
+    const decoded = buffer.subarray(0, 4).equals(zstdMagic) ? zstdDecompressSync(buffer) : buffer;
+    return decoded.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function listWxCacheDatabases() {
+  const cacheDir = path.join(os.homedir(), '.wx-cli', 'cache');
+  if (!fs.existsSync(cacheDir)) return [];
+  return fs.readdirSync(cacheDir)
+    .filter((file) => file.endsWith('.db'))
+    .map((file) => path.join(cacheDir, file));
+}
+
+function readLocalId(raw: AnyRecord, content: string, id: string) {
+  const direct = raw.local_id ?? raw.localId ?? raw.id;
+  if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
+  if (typeof direct === 'string' && /^\d+$/.test(direct)) return Number(direct);
+  const match = content.match(/local_id=(\d+)/i);
+  if (match) return Number(match[1]);
+  return /^\d+$/.test(id) ? Number(id) : 0;
+}
+
+function readTimestamp(raw: AnyRecord, sentAt: string) {
+  const direct = raw.timestamp ?? raw.create_time ?? raw.createTime;
+  if (typeof direct === 'number' && Number.isFinite(direct)) return direct > 10_000_000_000 ? Math.floor(direct / 1000) : direct;
+  if (typeof direct === 'string' && /^\d+$/.test(direct)) {
+    const value = Number(direct);
+    return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
+  }
+  const parsed = new Date(sentAt).getTime();
+  return Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
+}
+
+function quoteIdentifier(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function cryptoHash(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return String(hash);
 }
 
 function findContactRow(username: string, fallbackName: string) {
